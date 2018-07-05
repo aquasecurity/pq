@@ -136,7 +136,7 @@ func (l *ListenerConn) listenerConnLoop() (err error) {
 
 	r := &readBuf{}
 	for {
-		t, err := l.cn.recvMessage(r)
+		t, err := l.cn.recvMessage(r, false)
 		if err != nil {
 			return err
 		}

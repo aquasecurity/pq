@@ -141,7 +141,7 @@ func (ci *copyin) flush(buf []byte) {
 func (ci *copyin) resploop() {
 	for {
 		var r readBuf
-		t, err := ci.cn.recvMessage(&r)
+		t, err := ci.cn.recvMessage(&r, false)
 		if err != nil {
 			ci.setBad()
 			ci.setError(err)

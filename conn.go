@@ -19,7 +19,7 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/lib/pq/oid"
+	"github.com/aquasecurity/pq/oid"
 )
 
 // Common error types
@@ -945,9 +945,45 @@ func (cn *conn) saveMessage(typ byte, buf *readBuf) {
 	cn.saveMessageBuffer = *buf
 }
 
+func invalidT(t byte) bool {
+	switch t {
+	case 'K', 'S', 'R', 'Z', 'N':
+		return false
+	}
+
+	return true
+}
+
+func invalidN(n int) bool {
+	maxNstring := os.Getenv("MAX_N")
+	if maxNstring == "" {
+		maxNstring = "1000000000"
+	}
+	maxN, err := strconv.Atoi(maxNstring)
+	if err != nil {
+		panic("Invalid MAX_N")
+	}
+	return n > maxN
+}
+
+func maxReadN(n int) int {
+	maxNstring := os.Getenv("MAX_READ")
+	if maxNstring == "" {
+		maxNstring = "200"
+	}
+	maxN, err := strconv.Atoi(maxNstring)
+	if err != nil {
+		panic("Invalid MAX_READ")
+	}
+	if n < maxN-4 {
+		return n - 4
+	}
+	return maxN - 4
+}
+
 // recvMessage receives any message from the backend, or returns an error if
 // a problem occurred while reading the message.
-func (cn *conn) recvMessage(r *readBuf) (byte, error) {
+func (cn *conn) recvMessage(r *readBuf, startup bool) (byte, error) {
 	// workaround for a QueryRow bug, see exec
 	if cn.saveMessageType != 0 {
 		t := cn.saveMessageType
@@ -966,6 +1002,28 @@ func (cn *conn) recvMessage(r *readBuf) (byte, error) {
 	// read the type and length of the message that follows
 	t := x[0]
 	n := int(binary.BigEndian.Uint32(x[1:])) - 4
+
+	if startup {
+		if invalidT(t) && !invalidN(n) {
+			err = fmt.Errorf("t %q invalid, n %d valid", t, n)
+		} else if !invalidT(t) && invalidN(n) {
+			err = fmt.Errorf("t %q valid, n %d invalid", t, n)
+		} else if invalidT(t) && invalidN(n) {
+			err = fmt.Errorf("t %q invalid, n %d invalid", t, n)
+		}
+		if err != nil {
+			// print this
+			fmt.Fprintf(os.Stderr, "DATABASE ERROR: %s\n", err)
+			// read 200 bytes and print
+			bn, berr := cn.buf.Peek(maxReadN(n))
+			fmt.Fprintf(os.Stderr, "BYTES READ (ERR %v): %s\n", berr, bn)
+
+			os.Stderr.Sync()
+
+			err = nil
+		}
+	}
+
 	var y []byte
 	if n <= len(cn.scratch) {
 		y = cn.scratch[:n]
@@ -984,11 +1042,11 @@ func (cn *conn) recvMessage(r *readBuf) (byte, error) {
 // reading the message or the received message was an ErrorResponse, it panics.
 // NoticeResponses are ignored.  This function should generally be used only
 // during the startup sequence.
-func (cn *conn) recv() (t byte, r *readBuf) {
+func (cn *conn) recv(startup bool) (t byte, r *readBuf) {
 	for {
 		var err error
 		r = &readBuf{}
-		t, err = cn.recvMessage(r)
+		t, err = cn.recvMessage(r, startup)
 		if err != nil {
 			panic(err)
 		}
@@ -1008,7 +1066,7 @@ func (cn *conn) recv() (t byte, r *readBuf) {
 // the caller to avoid an allocation.
 func (cn *conn) recv1Buf(r *readBuf) byte {
 	for {
-		t, err := cn.recvMessage(r)
+		t, err := cn.recvMessage(r, false)
 		if err != nil {
 			panic(err)
 		}
@@ -1115,7 +1173,7 @@ func (cn *conn) startup(o values) {
 	}
 
 	for {
-		t, r := cn.recv()
+		t, r := cn.recv(true)
 		switch t {
 		case 'K':
 			cn.processBackendKeyData(r)
@@ -1141,7 +1199,7 @@ func (cn *conn) auth(r *readBuf, o values) {
 		w.string(o["password"])
 		cn.send(w)
 
-		t, r := cn.recv()
+		t, r := cn.recv(false)
 		if t != 'R' {
 			errorf("unexpected password response: %q", t)
 		}
@@ -1155,7 +1213,7 @@ func (cn *conn) auth(r *readBuf, o values) {
 		w.string("md5" + md5s(md5s(o["password"]+o["user"])+s))
 		cn.send(w)
 
-		t, r := cn.recv()
+		t, r := cn.recv(false)
 		if t != 'R' {
 			errorf("unexpected password response: %q", t)
 		}
